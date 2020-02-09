@@ -5,6 +5,7 @@ local ffi = require('ffi')
 local buffer = require('buffer')
 local fiber = require('fiber')
 local errno = require('errno')
+local schedule_task = fiber._internal.schedule_task
 
 ffi.cdef[[
     int umask(int mask);
@@ -141,10 +142,12 @@ end
 
 fio_methods.close = function(self)
     local res, err = internal.close(self.fh)
-    self.fh = -1
     if err ~= nil then
         return false, err
     end
+    ffi.gc(self._gc, nil)
+    self._gc = nil
+    self.fh = -1
     return res
 end
 
@@ -160,7 +163,23 @@ fio_methods.stat = function(self)
     return internal.fstat(self.fh)
 end
 
-local fio_mt = { __index = fio_methods }
+local fio_mt = {
+    __index = fio_methods,
+    __serialize = function(obj)
+        return {fh = obj.fh}
+    end,
+}
+
+local function fio_wrap(fh)
+    return setmetatable({
+        fh = fh,
+        _gc = ffi.gc(ffi.new('char[1]'), function()
+            -- FFI GC can't yield. Internal.close() yields.
+            -- Collect the garbage later, in a worker fiber.
+            schedule_task(internal.close, fh)
+        end)
+    }, fio_mt)
+end
 
 fio.open = function(path, flags, mode)
     local iflag = 0
@@ -202,10 +221,13 @@ fio.open = function(path, flags, mode)
     if err ~= nil then
         return nil, err
     end
-
-    fh = { fh = fh }
-    setmetatable(fh, fio_mt)
-    return fh
+    local ok, res = pcall(fio_wrap, fh)
+    if not ok then
+        internal.close(fh)
+        -- This is either OOM or bad syntax, both require throw.
+        return error(res)
+    end
+    return res
 end
 
 fio.pathjoin = function(...)
