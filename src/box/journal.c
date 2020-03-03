@@ -53,9 +53,7 @@ static struct journal dummy_journal = {
 struct journal *current_journal = &dummy_journal;
 
 struct journal_entry *
-journal_entry_new(size_t n_rows, struct region *region,
-		  journal_entry_complete_cb on_complete_cb,
-		  void *on_complete_cb_data)
+journal_entry_new(size_t n_rows, struct region *region)
 {
 	struct journal_entry *entry;
 
@@ -68,11 +66,13 @@ journal_entry_new(size_t n_rows, struct region *region,
 		diag_set(OutOfMemory, size, "region", "struct journal_entry");
 		return NULL;
 	}
+
 	entry->approx_len = 0;
 	entry->n_rows = n_rows;
 	entry->res = -1;
-	entry->on_complete_cb = on_complete_cb;
-	entry->on_complete_cb_data = on_complete_cb_data;
+	entry->on_complete_cb = NULL;
+	entry->on_complete_cb_data = NULL;
+
 	return entry;
 }
 

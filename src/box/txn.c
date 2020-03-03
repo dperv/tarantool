@@ -493,7 +493,7 @@ txn_journal_entry_new(struct txn *txn)
 	assert(txn->n_new_rows + txn->n_applier_rows > 0);
 
 	req = journal_entry_new(txn->n_new_rows + txn->n_applier_rows,
-				&txn->region, txn_entry_complete_cb, txn);
+				&txn->region);
 	if (req == NULL)
 		return NULL;
 
@@ -620,6 +620,8 @@ txn_commit_async(struct txn *txn)
 		txn_rollback(txn);
 		return -1;
 	}
+	req->on_complete_cb = txn_entry_complete_cb;
+	req->on_complete_cb_data = txn;
 
 	return txn_write_to_wal(req);
 }
@@ -647,6 +649,8 @@ txn_commit(struct txn *txn)
 		txn_rollback(txn);
 		goto out;
 	}
+	req->on_complete_cb = txn_entry_complete_cb;
+	req->on_complete_cb_data = txn;
 
 	if (txn_write_to_wal(req) != 0)
 		return -1;

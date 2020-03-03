@@ -93,9 +93,7 @@ struct region;
  * @return NULL if out of memory, fiber diagnostics area is set
  */
 struct journal_entry *
-journal_entry_new(size_t n_rows, struct region *region,
-		  journal_entry_complete_cb on_complete_cb,
-		  void *on_complete_cb_data);
+journal_entry_new(size_t n_rows, struct region *region);
 
 /**
  * Finalize a single entry.
