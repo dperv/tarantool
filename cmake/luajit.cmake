@@ -225,12 +225,35 @@ macro(luajit_build)
         set(luajit_xcflags ${luajit_xcflags} -D${def})
     endforeach()
 
+    # Add LTO option to luajit
+    if (CMAKE_INTERPROCEDURAL_OPTIMIZATION)
+	message("LTO for building luajit on")
+	# Clang opt to support LTO
+	if (CMAKE_COMPILER_IS_CLANG AND
+	    NOT ${CMAKE_CXX_COMPILER_VERSION} VERSION_LESS 3.4)
+	    if (${CMAKE_CXX_COMPILER_VERSION} VERSION_LESS 3.9)
+		set(luajit_cflags ${luajit_cflags} -flto=full)
+	    else()
+		message("ThinLTO supported")
+	        set(luajit_cflags ${luajit_cflags} -flto=full)
+	    endif()
+	# GNU opts tu support LTO
+	else()
+	   #Due to some problems (bugs, slow work, etc) we support LTO only for 5.0+
+	   #The same is for binutils prior 2.27
+	   if (NOT ${CMAKE_CXX_COMPILER_VERSION} VERSION_LESS 5.0
+	       AND NOT ${linker_version} VERSION_LESS 2.27)
+	       set(luajit_cflags ${luajit_cflags} -flto -fuse-linker-plugin -fno-fat-lto-objects)
+	   endif()
+        endif()
+    endif()
     # Pass the same toolchain that is used for building of
     # tarantool itself, because tools from different toolchains
     # can be incompatible. A compiler and a linker are already set
     # above.
     set (luajit_ld ${CMAKE_LINKER})
     set (luajit_ar ${CMAKE_AR} rcus)
+    message("${luajit_ar} ar lib that will be used")
     set (luajit_strip ${CMAKE_STRIP})
 
     set (luajit_buildoptions

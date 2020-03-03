@@ -78,7 +78,8 @@ if (NOT TARGET_OS_DARWIN)
         if (linker_version VERSION_LESS "2.31")
             message(FATAL_ERROR "ld.bfd >= 2.31 is needed for LTO")
         endif()
-    elseif(matched_gold)
+
+	elseif(matched_gold)
         set(linker_version ${CMAKE_MATCH_1})
         message(STATUS "Found ld.gold version: ${linker_version}")
 
@@ -94,4 +95,10 @@ endif()
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wno-lto-type-mismatch")
 
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+    # In case when ld.bdf utilils are used, ar/ranlib/nm can't see liblto_plugin.
+    # Use gcc-* instead.
+    if(matched_bfd AND NOT TARGET_OS_DARWIN)
+    set(CMAKE_AR gcc-ar)
+    set(CMAKE_RANLIB gcc-ranlib)
+endif()
 message(STATUS "Enabling LTO: TRUE")
