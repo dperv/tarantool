@@ -610,10 +610,24 @@ txn_commit_async(struct txn *txn)
 int
 txn_commit(struct txn *txn)
 {
+	int res = -1;
+
 	txn->fiber = fiber();
 
-	if (txn_commit_async(txn) != 0)
+	if (txn_prepare(txn) != 0) {
+		txn_rollback(txn);
+		goto out;
+	}
+
+	if (txn_commit_nop(txn)) {
+		res = 0;
+		goto out;
+	}
+
+	fiber_set_txn(fiber(), NULL);
+	if (txn_write_to_wal(txn) != 0)
 		return -1;
+
 	/*
 	 * In case of non-yielding journal the transaction could already
 	 * be done and there is nothing to wait in such cases.
@@ -623,10 +637,11 @@ txn_commit(struct txn *txn)
 		fiber_yield();
 		fiber_set_cancellable(cancellable);
 	}
-	int res = txn->signature >= 0 ? 0 : -1;
+	res = txn->signature >= 0 ? 0 : -1;
 	if (res != 0)
 		diag_set(ClientError, ER_WAL_IO);
 
+out:
 	/* Synchronous transactions are freed by the calling fiber. */
 	txn_free(txn);
 	return res;
