@@ -32,6 +32,7 @@
 
 #include "vclock.h"
 #include "fiber.h"
+#include "txn.h"
 #include "fio.h"
 #include "errinj.h"
 #include "error.h"
@@ -61,7 +62,15 @@ const char *wal_mode_STRS[] = { "none", "write", "fsync", NULL };
 int wal_dir_lock = -1;
 
 static int
+wal_write_async(struct journal *, struct journal_entry *,
+		journal_entry_complete_cb, void *);
+
+static int
 wal_write(struct journal *, struct journal_entry *);
+
+static int
+wal_write_in_wal_mode_none_async(struct journal *, struct journal_entry *,
+				 journal_entry_complete_cb, void *);
 
 static int
 wal_write_in_wal_mode_none(struct journal *, struct journal_entry *);
@@ -349,8 +358,14 @@ wal_writer_create(struct wal_writer *writer, enum wal_mode wal_mode,
 {
 	writer->wal_mode = wal_mode;
 	writer->wal_max_size = wal_max_size;
-	journal_create(&writer->base, wal_mode == WAL_NONE ?
-		       wal_write_in_wal_mode_none : wal_write, NULL);
+	journal_create(&writer->base,
+		       wal_mode == WAL_NONE ?
+		       wal_write_in_wal_mode_none_async :
+		       wal_write_async,
+		       wal_mode == WAL_NONE ?
+		       wal_write_in_wal_mode_none :
+		       wal_write,
+		       NULL);
 
 	struct xlog_opts opts = xlog_opts_default;
 	opts.sync_is_async = true;
@@ -1170,9 +1185,16 @@ wal_writer_f(va_list ap)
  * to be written to disk.
  */
 static int
-wal_write(struct journal *journal, struct journal_entry *entry)
+wal_write_async(struct journal *journal, struct journal_entry *entry,
+		journal_entry_complete_cb on_complete_cb,
+		void *on_complete_cb_data)
 {
 	struct wal_writer *writer = (struct wal_writer *) journal;
+	struct txn *txn = in_txn();
+
+	entry->on_complete_cb = on_complete_cb;
+	entry->on_complete_cb_data = on_complete_cb_data;
+	fiber_set_txn(fiber(), NULL);
 
 	ERROR_INJECT(ERRINJ_WAL_IO, {
 		goto fail;
@@ -1220,9 +1242,49 @@ wal_write(struct journal *journal, struct journal_entry *entry)
 	return 0;
 
 fail:
+	fiber_set_txn(fiber(), txn);
 	entry->res = -1;
-	journal_entry_complete(entry);
+	txn->signature = -1;
 	return -1;
+}
+
+static void
+wal_write_cb(struct journal_entry *entry, void *data)
+{
+	struct txn *txn = data;
+	(void)entry;
+	fiber_wakeup(txn->fiber);
+}
+
+static int
+wal_write(struct journal *journal,
+	  struct journal_entry *entry)
+{
+	struct txn *txn = in_txn();
+
+	if (wal_write_async(journal, entry, wal_write_cb, txn) != 0) {
+		return -1;
+	}
+
+	bool cancellable = fiber_set_cancellable(false);
+	fiber_yield();
+	fiber_set_cancellable(cancellable);
+
+	return 0;
+}
+
+static int
+wal_write_in_wal_mode_none_async(struct journal *journal,
+				 struct journal_entry *entry,
+				 journal_entry_complete_cb on_complete_cb,
+				 void *on_complete_cb_data)
+{
+	(void)journal;
+	(void)entry;
+	(void)on_complete_cb;
+	(void)on_complete_cb_data;
+
+	return 0;
 }
 
 static int

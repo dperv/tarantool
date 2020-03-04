@@ -518,23 +518,23 @@ txn_journal_entry_new(struct txn *txn)
 	return req;
 }
 
-static int64_t
-txn_write_to_wal(struct journal_entry *req)
-{
-	/*
-	 * Send the entry to the journal.
-	*
-	 * After this point the transaction must not be used
-	 * so reset the corresponding key in the fiber storage.
-	 */
-	fiber_set_txn(fiber(), NULL);
-	if (journal_write(req) < 0) {
-		diag_set(ClientError, ER_WAL_IO);
-		diag_log();
-		return -1;
-	}
-	return 0;
-}
+//static int64_t
+//txn_write_to_wal(struct journal_entry *req)
+//{
+//	/*
+//	 * Send the entry to the journal.
+//	*
+//	 * After this point the transaction must not be used
+//	 * so reset the corresponding key in the fiber storage.
+//	 */
+//	fiber_set_txn(fiber(), NULL);
+//	if (journal_write(req) < 0) {
+//		diag_set(ClientError, ER_WAL_IO);
+//		diag_log();
+//		return -1;
+//	}
+//	return 0;
+//}
 
 /*
  * Prepare a transaction using engines.
@@ -614,10 +614,8 @@ txn_commit_async(struct txn *txn)
 		txn_rollback(txn);
 		return -1;
 	}
-	req->on_complete_cb = txn_entry_complete_cb;
-	req->on_complete_cb_data = txn;
 
-	return txn_write_to_wal(req);
+	return journal_write_async(req, txn_entry_complete_cb, txn);
 }
 
 int
@@ -643,25 +641,17 @@ txn_commit(struct txn *txn)
 		txn_rollback(txn);
 		goto out;
 	}
-	req->on_complete_cb = txn_entry_complete_cb;
-	req->on_complete_cb_data = txn;
 
-	if (txn_write_to_wal(req) != 0)
+	if (journal_write(req))
 		return -1;
 
-	/*
-	 * In case of non-yielding journal the transaction could already
-	 * be done and there is nothing to wait in such cases.
-	 */
-	if (!txn_has_flag(txn, TXN_IS_DONE)) {
-		bool cancellable = fiber_set_cancellable(false);
-		fiber_yield();
-		fiber_set_cancellable(cancellable);
-	}
+	txn->signature = req->res;
 	res = txn->signature >= 0 ? 0 : -1;
 	if (res != 0)
 		diag_set(ClientError, ER_WAL_IO);
 
+	txn_complete(txn);
+	fiber_set_txn(fiber(), NULL);
 out:
 	/* Synchronous transactions are freed by the calling fiber. */
 	txn_free(txn);

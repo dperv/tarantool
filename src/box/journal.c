@@ -32,6 +32,21 @@
 #include <small/region.h>
 #include <diag.h>
 
+int
+journal_no_write_async(struct journal *journal,
+		       struct journal_entry *entry,
+		       journal_entry_complete_cb on_complete_cb,
+		       void *on_complete_cb_data)
+{
+	(void)journal;
+	(void)entry;
+	(void)on_complete_cb;
+	(void)on_complete_cb_data;
+
+	say_error("journal: write_async called from invalid context");
+	return -1;
+}
+
 /**
  * Used to load from a memtx snapshot. LSN is not used,
  * but txn_commit() must work.
@@ -41,13 +56,12 @@ dummy_journal_write(struct journal *journal, struct journal_entry *entry)
 {
 	(void) journal;
 	entry->res = 0;
-	journal_entry_complete(entry);
 	return 0;
 }
 
 static struct journal dummy_journal = {
-	dummy_journal_write,
-	NULL,
+	.write_async	= journal_no_write_async,
+	.write		= dummy_journal_write,
 };
 
 struct journal *current_journal = &dummy_journal;
@@ -75,4 +89,3 @@ journal_entry_new(size_t n_rows, struct region *region)
 
 	return entry;
 }
-

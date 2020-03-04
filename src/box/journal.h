@@ -110,6 +110,10 @@ journal_entry_complete(struct journal_entry *entry)
  * synchronous replication.
  */
 struct journal {
+	int (*write_async)(struct journal *journal,
+			   struct journal_entry *entry,
+			   journal_entry_complete_cb on_complete_cb,
+			   void *on_complete_cb_data);
 	int (*write)(struct journal *journal,
 		     struct journal_entry *req);
 	void (*destroy)(struct journal *journal);
@@ -121,15 +125,20 @@ struct journal {
  */
 extern struct journal *current_journal;
 
-/**
- * Send a single entry to write.
- *
- * @return 0 if write was scheduled or -1 in case of an error.
- */
 static inline int
 journal_write(struct journal_entry *entry)
 {
 	return current_journal->write(current_journal, entry);
+}
+
+static inline int
+journal_write_async(struct journal_entry *entry,
+		    journal_entry_complete_cb on_complete_cb,
+		    void *on_complete_cb_data)
+{
+	return current_journal->write_async(current_journal, entry,
+					    on_complete_cb,
+					    on_complete_cb_data);
 }
 
 /**
@@ -163,17 +172,29 @@ journal_set(struct journal *new_journal)
 
 static inline void
 journal_create(struct journal *journal,
+	       int (*write_async)(struct journal *journal,
+				  struct journal_entry *entry,
+				  journal_entry_complete_cb on_complete_cb,
+				  void *on_complete_cb_data),
 	       int (*write)(struct journal *, struct journal_entry *),
 	       void (*destroy)(struct journal *))
 {
-	journal->write = write;
-	journal->destroy = destroy;
+	journal->write_async	= write_async,
+	journal->write		= write;
+	journal->destroy	= destroy;
 }
+
+extern int
+journal_no_write_async(struct journal *journal,
+		       struct journal_entry *entry,
+		       journal_entry_complete_cb on_complete_cb,
+		       void *on_complete_cb_data);
 
 static inline bool
 journal_is_initialized(struct journal *journal)
 {
-	return journal->write != NULL;
+	return journal->write != NULL &&
+		journal->write_async != NULL;
 }
 
 #if defined(__cplusplus)
