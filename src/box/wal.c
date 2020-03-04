@@ -1192,13 +1192,13 @@ wal_write_async(struct journal *journal, struct journal_entry *entry,
 	struct wal_writer *writer = (struct wal_writer *) journal;
 	struct txn *txn = in_txn();
 
-	ERROR_INJECT(ERRINJ_WAL_IO, {
-		goto fail;
-	});
-
 	entry->on_complete_cb = on_complete_cb;
 	entry->on_complete_cb_data = on_complete_cb_data;
 	fiber_set_txn(fiber(), NULL);
+
+	ERROR_INJECT(ERRINJ_WAL_IO, {
+		goto fail;
+	});
 
 	if (! stailq_empty(&writer->rollback)) {
 		/*

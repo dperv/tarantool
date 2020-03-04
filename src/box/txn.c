@@ -644,8 +644,11 @@ txn_commit(struct txn *txn)
 	if (req == NULL)
 		goto out_rollback;
 
-	if (journal_write(req) != 0)
+	if (journal_write(req) != 0) {
+		diag_set(ClientError, ER_WAL_IO);
+		diag_log();
 		goto out_rollback;
+	}
 
 	txn->signature = req->res;
 	res = txn->signature >= 0 ? 0 : -1;
