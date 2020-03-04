@@ -34,6 +34,7 @@
 #include <stdbool.h>
 #include "salad/stailq.h"
 #include "fiber.h"
+#include "txn.h"
 
 #if defined(__cplusplus)
 extern "C" {
@@ -128,6 +129,7 @@ extern struct journal *current_journal;
 static inline int
 journal_write(struct journal_entry *entry)
 {
+	assert(in_txn() != NULL);
 	return current_journal->write(current_journal, entry);
 }
 
@@ -136,6 +138,7 @@ journal_write_async(struct journal_entry *entry,
 		    journal_entry_complete_cb on_complete_cb,
 		    void *on_complete_cb_data)
 {
+	assert(in_txn() != NULL);
 	return current_journal->write_async(current_journal, entry,
 					    on_complete_cb,
 					    on_complete_cb_data);

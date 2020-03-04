@@ -463,7 +463,7 @@ txn_complete(struct txn *txn)
 }
 
 static void
-txn_entry_complete_cb(struct journal_entry *entry, void *data)
+txn_async_complete(struct journal_entry *entry, void *data)
 {
 	struct txn *txn = data;
 	txn->signature = entry->res;
@@ -601,35 +601,39 @@ txn_commit_async(struct txn *txn)
 {
 	struct journal_entry *req;
 
-	if (txn_prepare(txn) != 0) {
-		txn_rollback(txn);
-		return -1;
-	}
+	if (txn_prepare(txn) != 0)
+		goto out_rollback;
 
 	if (txn_commit_nop(txn))
 		return 0;
 
 	req = txn_journal_entry_new(txn);
-	if (req == NULL) {
-		txn_rollback(txn);
-		return -1;
+	if (req == NULL)
+		goto out_rollback;
+
+	if (journal_write_async(req, txn_async_complete, txn) != 0) {
+		diag_set(ClientError, ER_WAL_IO);
+		diag_log();
+		goto out_rollback;
 	}
 
-	return journal_write_async(req, txn_entry_complete_cb, txn);
+	return 0;
+
+out_rollback:
+	txn_rollback(txn);
+	return -1;
 }
 
 int
 txn_commit(struct txn *txn)
 {
 	struct journal_entry *req;
-	int res = -1;
+	int res;
 
 	txn->fiber = fiber();
 
-	if (txn_prepare(txn) != 0) {
-		txn_rollback(txn);
-		goto out;
-	}
+	if (txn_prepare(txn) != 0)
+		goto out_rollback;
 
 	if (txn_commit_nop(txn)) {
 		res = 0;
@@ -637,25 +641,31 @@ txn_commit(struct txn *txn)
 	}
 
 	req = txn_journal_entry_new(txn);
-	if (req == NULL) {
-		txn_rollback(txn);
-		goto out;
-	}
+	if (req == NULL)
+		goto out_rollback;
 
-	if (journal_write(req))
-		return -1;
+	if (journal_write(req) != 0)
+		goto out_rollback;
 
 	txn->signature = req->res;
 	res = txn->signature >= 0 ? 0 : -1;
-	if (res != 0)
+	if (res != 0) {
 		diag_set(ClientError, ER_WAL_IO);
+		diag_log();
+	}
 
 	txn_complete(txn);
 	fiber_set_txn(fiber(), NULL);
 out:
+
 	/* Synchronous transactions are freed by the calling fiber. */
 	txn_free(txn);
 	return res;
+
+out_rollback:
+	res = -1;
+	txn_rollback(txn);
+	goto out;
 }
 
 void

@@ -1192,13 +1192,13 @@ wal_write_async(struct journal *journal, struct journal_entry *entry,
 	struct wal_writer *writer = (struct wal_writer *) journal;
 	struct txn *txn = in_txn();
 
-	entry->on_complete_cb = on_complete_cb;
-	entry->on_complete_cb_data = on_complete_cb_data;
-	fiber_set_txn(fiber(), NULL);
-
 	ERROR_INJECT(ERRINJ_WAL_IO, {
 		goto fail;
 	});
+
+	entry->on_complete_cb = on_complete_cb;
+	entry->on_complete_cb_data = on_complete_cb_data;
+	fiber_set_txn(fiber(), NULL);
 
 	if (! stailq_empty(&writer->rollback)) {
 		/*
@@ -1243,13 +1243,13 @@ wal_write_async(struct journal *journal, struct journal_entry *entry,
 
 fail:
 	fiber_set_txn(fiber(), txn);
-	entry->res = -1;
 	txn->signature = -1;
+	entry->res = -1;
 	return -1;
 }
 
 static void
-wal_write_cb(struct journal_entry *entry, void *data)
+write_complete(struct journal_entry *entry, void *data)
 {
 	struct txn *txn = data;
 	(void)entry;
@@ -1257,18 +1257,17 @@ wal_write_cb(struct journal_entry *entry, void *data)
 }
 
 static int
-wal_write(struct journal *journal,
-	  struct journal_entry *entry)
+wal_write(struct journal *journal, struct journal_entry *entry)
 {
 	struct txn *txn = in_txn();
 
-	if (wal_write_async(journal, entry, wal_write_cb, txn) != 0) {
+	if (wal_write_async(journal, entry, write_complete, txn) != 0)
 		return -1;
-	}
 
 	bool cancellable = fiber_set_cancellable(false);
 	fiber_yield();
 	fiber_set_cancellable(cancellable);
+	fiber_set_txn(fiber(), txn);
 
 	return 0;
 }
@@ -1279,10 +1278,22 @@ wal_write_in_wal_mode_none_async(struct journal *journal,
 				 journal_entry_complete_cb on_complete_cb,
 				 void *on_complete_cb_data)
 {
-	(void)journal;
-	(void)entry;
+	struct wal_writer *writer = (struct wal_writer *)journal;
+	struct vclock vclock_diff;
+	struct txn *txn = in_txn();
+
 	(void)on_complete_cb;
 	(void)on_complete_cb_data;
+
+	fiber_set_txn(fiber(), NULL);
+
+	vclock_create(&vclock_diff);
+	wal_assign_lsn(&vclock_diff, &writer->vclock, entry->rows,
+		       entry->rows + entry->n_rows);
+	vclock_merge(&writer->vclock, &vclock_diff);
+	vclock_copy(&replicaset.vclock, &writer->vclock);
+	entry->res = vclock_sum(&writer->vclock);
+	txn->signature = entry->res;
 
 	return 0;
 }
@@ -1291,16 +1302,8 @@ static int
 wal_write_in_wal_mode_none(struct journal *journal,
 			   struct journal_entry *entry)
 {
-	struct wal_writer *writer = (struct wal_writer *) journal;
-	struct vclock vclock_diff;
-	vclock_create(&vclock_diff);
-	wal_assign_lsn(&vclock_diff, &writer->vclock, entry->rows,
-		       entry->rows + entry->n_rows);
-	vclock_merge(&writer->vclock, &vclock_diff);
-	vclock_copy(&replicaset.vclock, &writer->vclock);
-	entry->res = vclock_sum(&writer->vclock);
-	journal_entry_complete(entry);
-	return 0;
+	return wal_write_in_wal_mode_none_async(journal, entry,
+						NULL, NULL);
 }
 
 void
