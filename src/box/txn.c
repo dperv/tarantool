@@ -463,7 +463,7 @@ txn_complete(struct txn *txn)
 }
 
 static void
-txn_entry_complete_cb(struct journal_entry *entry, void *data)
+txn_async_complete(struct journal_entry *entry, void *data)
 {
 	struct txn *txn = data;
 	txn->signature = entry->res;
@@ -478,6 +478,10 @@ txn_entry_complete_cb(struct journal_entry *entry, void *data)
 	fiber_set_txn(fiber(), NULL);
 }
 
+/**
+ * Allocate new journal entry with transaction
+ * data to write.
+ */
 static struct journal_entry *
 txn_journal_entry_new(struct txn *txn)
 {
@@ -516,24 +520,6 @@ txn_journal_entry_new(struct txn *txn)
 	assert(local_row == remote_row + txn->n_new_rows);
 
 	return req;
-}
-
-static int64_t
-txn_write_to_wal(struct journal_entry *req)
-{
-	/*
-	 * Send the entry to the journal.
-	*
-	 * After this point the transaction must not be used
-	 * so reset the corresponding key in the fiber storage.
-	 */
-	fiber_set_txn(fiber(), NULL);
-	if (journal_write(req) < 0) {
-		diag_set(ClientError, ER_WAL_IO);
-		diag_log();
-		return -1;
-	}
-	return 0;
 }
 
 /*
@@ -596,42 +582,51 @@ txn_commit_nop(struct txn *txn)
 	return false;
 }
 
+/**
+ * Commit a transaction asynchronously, the
+ * completion is processed by a callback.
+ */
 int
 txn_commit_async(struct txn *txn)
 {
 	struct journal_entry *req;
 
-	if (txn_prepare(txn) != 0) {
-		txn_rollback(txn);
-		return -1;
-	}
+	if (txn_prepare(txn) != 0)
+		goto out_rollback;
 
 	if (txn_commit_nop(txn))
 		return 0;
 
 	req = txn_journal_entry_new(txn);
-	if (req == NULL) {
-		txn_rollback(txn);
-		return -1;
-	}
-	req->on_complete_cb = txn_entry_complete_cb;
-	req->on_complete_cb_data = txn;
+	if (req == NULL)
+		goto out_rollback;
 
-	return txn_write_to_wal(req);
+	if (journal_write_async(req, txn_async_complete, txn) != 0) {
+		diag_set(ClientError, ER_WAL_IO);
+		diag_log();
+		goto out_rollback;
+	}
+
+	return 0;
+
+out_rollback:
+	txn_rollback(txn);
+	return -1;
 }
 
+/**
+ * Commit a transaction synchronously.
+ */
 int
 txn_commit(struct txn *txn)
 {
 	struct journal_entry *req;
-	int res = -1;
+	int res;
 
 	txn->fiber = fiber();
 
-	if (txn_prepare(txn) != 0) {
-		txn_rollback(txn);
-		goto out;
-	}
+	if (txn_prepare(txn) != 0)
+		goto out_rollback;
 
 	if (txn_commit_nop(txn)) {
 		res = 0;
@@ -639,33 +634,40 @@ txn_commit(struct txn *txn)
 	}
 
 	req = txn_journal_entry_new(txn);
-	if (req == NULL) {
-		txn_rollback(txn);
-		goto out;
-	}
-	req->on_complete_cb = txn_entry_complete_cb;
-	req->on_complete_cb_data = txn;
-
-	if (txn_write_to_wal(req) != 0)
-		return -1;
+	if (req == NULL)
+		goto out_rollback;
 
 	/*
-	 * In case of non-yielding journal the transaction could already
-	 * be done and there is nothing to wait in such cases.
+	 * FIXME: Move error setup inside the
+	 * journal engine itself. The ClientError
+	 * here is too general.
 	 */
-	if (!txn_has_flag(txn, TXN_IS_DONE)) {
-		bool cancellable = fiber_set_cancellable(false);
-		fiber_yield();
-		fiber_set_cancellable(cancellable);
-	}
-	res = txn->signature >= 0 ? 0 : -1;
-	if (res != 0)
-		diag_set(ClientError, ER_WAL_IO);
 
+	if (journal_write(req) != 0) {
+		diag_set(ClientError, ER_WAL_IO);
+		diag_log();
+		goto out_rollback;
+	}
+
+	txn->signature = req->res;
+	res = txn->signature >= 0 ? 0 : -1;
+	if (res != 0) {
+		diag_set(ClientError, ER_WAL_IO);
+		diag_log();
+	}
+
+	txn_complete(txn);
+	fiber_set_txn(fiber(), NULL);
 out:
+
 	/* Synchronous transactions are freed by the calling fiber. */
 	txn_free(txn);
 	return res;
+
+out_rollback:
+	res = -1;
+	txn_rollback(txn);
+	goto out;
 }
 
 void

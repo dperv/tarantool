@@ -32,6 +32,7 @@
 
 #include "vclock.h"
 #include "fiber.h"
+#include "txn.h"
 #include "fio.h"
 #include "errinj.h"
 #include "error.h"
@@ -61,10 +62,18 @@ const char *wal_mode_STRS[] = { "none", "write", "fsync", NULL };
 int wal_dir_lock = -1;
 
 static int
+wal_write_async(struct journal *, struct journal_entry *,
+		journal_entry_complete_cb, void *);
+
+static int
 wal_write(struct journal *, struct journal_entry *);
 
 static int
-wal_write_in_wal_mode_none(struct journal *, struct journal_entry *);
+wal_write_none_async(struct journal *, struct journal_entry *,
+		     journal_entry_complete_cb, void *);
+
+static int
+wal_write_none(struct journal *, struct journal_entry *);
 
 /*
  * WAL writer - maintain a Write Ahead Log for every change
@@ -349,8 +358,12 @@ wal_writer_create(struct wal_writer *writer, enum wal_mode wal_mode,
 {
 	writer->wal_mode = wal_mode;
 	writer->wal_max_size = wal_max_size;
-	journal_create(&writer->base, wal_mode == WAL_NONE ?
-		       wal_write_in_wal_mode_none : wal_write, NULL);
+	journal_create(&writer->base,
+		       wal_mode == WAL_NONE ?
+		       wal_write_none_async : wal_write_async,
+		       wal_mode == WAL_NONE ?
+		       wal_write_none : wal_write,
+		       NULL);
 
 	struct xlog_opts opts = xlog_opts_default;
 	opts.sync_is_async = true;
@@ -1170,9 +1183,21 @@ wal_writer_f(va_list ap)
  * to be written to disk.
  */
 static int
-wal_write(struct journal *journal, struct journal_entry *entry)
+wal_write_async(struct journal *journal, struct journal_entry *entry,
+		journal_entry_complete_cb on_complete_cb,
+		void *on_complete_cb_data)
 {
 	struct wal_writer *writer = (struct wal_writer *) journal;
+	struct txn *txn = in_txn();
+
+	/*
+	 * After this point the transaction will
+	 * live on its own and processed via callbacks,
+	 * so reset the fiber storage.
+	 */
+	entry->on_complete_cb = on_complete_cb;
+	entry->on_complete_cb_data = on_complete_cb_data;
+	fiber_set_txn(fiber(), NULL);
 
 	ERROR_INJECT(ERRINJ_WAL_IO, {
 		goto fail;
@@ -1220,25 +1245,88 @@ wal_write(struct journal *journal, struct journal_entry *entry)
 	return 0;
 
 fail:
+	/*
+	 * Don't forget to restore transaction
+	 * in a fiber storage: the caller should
+	 * be able to run a rollback procedure.
+	 */
+	fiber_set_txn(fiber(), txn);
 	entry->res = -1;
-	journal_entry_complete(entry);
+	txn->signature = -1;
 	return -1;
 }
 
-static int
-wal_write_in_wal_mode_none(struct journal *journal,
-			   struct journal_entry *entry)
+static void
+wal_write_cb(struct journal_entry *entry, void *data)
 {
-	struct wal_writer *writer = (struct wal_writer *) journal;
+	struct txn *txn = data;
+	(void)entry;
+
+	/*
+	 * On synchronous write just wake up
+	 * the waiter which will complete the
+	 * transaction.
+	 */
+	fiber_wakeup(txn->fiber);
+}
+
+/*
+ * Queue entry to write and wait until it processed.
+ */
+static int
+wal_write(struct journal *journal, struct journal_entry *entry)
+{
+	struct txn *txn = in_txn();
+
+	/*
+	 * Lets reuse async WAL engine to shrink code a bit.
+	 */
+	if (wal_write_async(journal, entry, wal_write_cb, txn) != 0)
+		return -1;
+
+	bool cancellable = fiber_set_cancellable(false);
+	fiber_yield();
+	fiber_set_cancellable(cancellable);
+
+	/*
+	 * Unlike async write we preserve the transaction
+	 * in a fiber storage where the caller should finish
+	 * the transaction.
+	 */
+	fiber_set_txn(fiber(), txn);
+	return 0;
+}
+
+static int
+wal_write_none_async(struct journal *journal,
+		     struct journal_entry *entry,
+		     journal_entry_complete_cb on_complete_cb,
+		     void *on_complete_cb_data)
+{
+	struct wal_writer *writer = (struct wal_writer *)journal;
 	struct vclock vclock_diff;
+	struct txn *txn = in_txn();
+
+	(void)on_complete_cb;
+	(void)on_complete_cb_data;
+
+	fiber_set_txn(fiber(), NULL);
+
 	vclock_create(&vclock_diff);
 	wal_assign_lsn(&vclock_diff, &writer->vclock, entry->rows,
 		       entry->rows + entry->n_rows);
 	vclock_merge(&writer->vclock, &vclock_diff);
 	vclock_copy(&replicaset.vclock, &writer->vclock);
 	entry->res = vclock_sum(&writer->vclock);
-	journal_entry_complete(entry);
+
+	txn->signature = entry->res;
 	return 0;
+}
+
+static int
+wal_write_none(struct journal *journal, struct journal_entry *entry)
+{
+	return wal_write_none_async(journal, entry, NULL, NULL);
 }
 
 void
