@@ -12,6 +12,7 @@ local errno = require('errno')
 local urilib = require('uri')
 local yaml = require('yaml')
 local net_box = require('net.box')
+local box_internal = require('box.internal')
 
 local PUSH_TAG_HANDLE = '!push!'
 
@@ -94,6 +95,11 @@ local function format_lua_value(value, opts)
         return serpent.block(value, serpent_opts)
     end
     return serpent.line(value, serpent_opts)
+end
+
+box_internal.format_lua_value = function(value)  -- for console_session_push
+    value = format_lua_value(value)
+    return value .. '\n'
 end
 
 output_handlers["lua"] = function(status, opts, ...)

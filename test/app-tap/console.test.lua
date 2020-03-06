@@ -21,7 +21,7 @@ local EOL = "\n...\n"
 
 test = tap.test("console")
 
-test:plan(73)
+test:plan(74)
 
 -- Start console and connect to it
 local server = console.listen(CONSOLE_SOCKET)
@@ -38,6 +38,18 @@ client:write('box.session.push(200)\n')
 test:is(client:read(EOL), '%TAG !push! tag:tarantool.io/push,2018\n--- 200\n...\n',
         "pushed message")
 test:is(client:read(EOL), '---\n- true\n...\n', "pushed message")
+
+--
+-- gh-4686: box.session.push should respect output format.
+--
+client:write('\\set output lua\n')
+client:read(";")
+
+client:write('box.session.push({ { [\'field\'] = 100 }, { 1, 2, 3 }, \'abc\' })\n')
+test:is(client:read(";"), '{{field = 100}, {1, 2, 3}, "abc"}\ntrue;', "pushed message")
+
+client:write('\\set output yaml\n')
+client:read(EOL)
 
 --
 -- gh-3790: box.session.push support uint64_t sync.
