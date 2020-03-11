@@ -9,7 +9,8 @@ MAX_FILES?=65534
 all: package
 
 package:
-	git clone https://github.com/packpack/packpack.git packpack
+	git clone https://github.com/avtikhon/packpack.git packpack
+	( cd packpack && git checkout avtikhon/4599-add-travis-flag )
 	./packpack/packpack
 
 test: test_$(TRAVIS_OS_NAME)
